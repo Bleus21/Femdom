@@ -189,6 +189,7 @@ def repost_post(
     """
     Repost + per-user limit + tracking.
     Bij promo mag hij oude reposts opnieuw doen (met un-repost).
+    Geeft de post ook meteen een like.
     """
     post = feed_item.post
     uri = post.uri
@@ -223,7 +224,14 @@ def repost_post(
                 pass
 
     try:
+        # Repost
         client.repost(uri=uri, cid=cid)
+        # Like erbij
+        try:
+            client.like(uri=uri, cid=cid)
+        except Exception:
+            # Like moet niet de run laten falen
+            pass
     except Exception:
         # Minimal logging -> geen trace
         return False
@@ -333,9 +341,13 @@ def process_promo_list(
         return 0
 
     members = get_list_members_dids(client, LIST_PROMO_URI)
+
+    # 🔀 Nieuw: random volgorde
+    random.shuffle(members)
+
     done = 0
 
-    # Volgorde: lijstvolgorde, per actor 1 random post uit laatste 5
+    # Per actor 1 random post uit laatste 5, in gehusselde volgorde
     for did in members:
         if remaining <= 0:
             break
@@ -380,7 +392,7 @@ def main() -> None:
     total_done += done_feed
     remaining -= done_feed
 
-    # 2. Promo-lijst (random uit laatste 5 per account)
+    # 2. Promo-lijst (random volgorde, random post per account)
     done_promo = process_promo_list(
         client, excluded_dids, per_user_counts, reposted, remaining
     )
