@@ -2,6 +2,7 @@ import os
 import time
 import random
 from typing import List, Set, Dict, Optional
+from datetime import datetime, timezone, timedelta
 
 from atproto import Client, models
 
@@ -16,6 +17,7 @@ REPOSTED_FILE = "reposted_FD.txt"
 MAX_REPOSTS_PER_RUN = 100
 MAX_PER_USER_PER_RUN = 6
 DELAY_SECONDS = 2
+CLEANUP_DAYS = 7  # reposts ouder dan 7 dagen verwijderen
 
 # Feed
 FEED_URI = (
@@ -32,7 +34,7 @@ LIST_EXCLUDE_URI = (
 # PROMO-lijst
 LIST_PROMO_URI = (
     "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
-    "app.bsky.graph.list/3mbadkrmbg72j"
+    "app.bsky.graph.list/3mbadkrmbd72j"
 )
 
 
@@ -68,6 +70,100 @@ def create_client() -> Client:
     client = Client()
     client.login(USERNAME, PASSWORD)
     return client
+
+
+# --- Helpers: tijd / cleanup ----------------------------------------
+
+
+def parse_iso_datetime(value: str) -> Optional[datetime]:
+    """
+    Veilige ISO8601-parser met support voor 'Z'.
+    """
+    if not value:
+        return None
+    try:
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def cleanup_old_reposts(client: Client, days: int = CLEANUP_DAYS) -> int:
+    """
+    Verwijder oude reposts ouder dan X dagen,
+    MAAR niet wanneer de oorspronkelijke auteur in de promo-lijst zit.
+    """
+    # Promo-leden ophalen (DIDs)
+    promo_members = set(get_list_members_dids(client, LIST_PROMO_URI))
+
+    threshold = datetime.now(timezone.utc) - timedelta(days=days)
+    deleted = 0
+    cursor: Optional[str] = None
+
+    while True:
+        params = models.AppBskyFeedGetAuthorFeed.Params(
+            actor=USERNAME,  # handle van deze bot
+            limit=100,
+            cursor=cursor,
+        )
+        resp = client.app.bsky.feed.get_author_feed(params)
+        if not resp.feed:
+            break
+
+        for item in resp.feed:
+            post = getattr(item, "post", None)
+            if not post:
+                continue
+
+            record = getattr(post, "record", None)
+            if not record:
+                continue
+
+            # Alleen repost records opruimen
+            if getattr(record, "$type", "") != "app.bsky.feed.repost":
+                continue
+
+            indexed_at = getattr(post, "indexed_at", None)
+            dt = parse_iso_datetime(indexed_at) if indexed_at else None
+            if not dt or dt > threshold:
+                # Niet oud genoeg of geen datum
+                continue
+
+            # Originele subject (de post die gerepost is)
+            subject = getattr(record, "subject", None)
+            subj_uri = getattr(subject, "uri", None) if subject else None
+
+            original_author_did: Optional[str] = None
+            if subj_uri:
+                try:
+                    posts_resp = client.app.bsky.feed.get_posts(
+                        models.AppBskyFeedGetPosts.Params(uris=[subj_uri])
+                    )
+                    for p in posts_resp.posts:
+                        if p.uri == subj_uri:
+                            auth = getattr(p, "author", None)
+                            original_author_did = getattr(auth, "did", None)
+                            break
+                except Exception:
+                    original_author_did = None
+
+            # 👉 Als originele auteur in promo-lijst zit → NIET verwijderen
+            if original_author_did in promo_members:
+                continue
+
+            # Oude repost verwijderen
+            try:
+                client.delete_repost(post.uri)
+                deleted += 1
+            except Exception:
+                continue
+
+        if not resp.cursor:
+            break
+        cursor = resp.cursor
+
+    return deleted
 
 
 # --- Lijsten & filters ----------------------------------------------
@@ -342,7 +438,7 @@ def process_promo_list(
 
     members = get_list_members_dids(client, LIST_PROMO_URI)
 
-    # 🔀 Nieuw: random volgorde
+    # Random volgorde van accounts
     random.shuffle(members)
 
     done = 0
@@ -381,6 +477,9 @@ def main() -> None:
         print("Kon niet inloggen op Bluesky.")
         return
 
+    # 0. Opruimen: oude reposts verwijderen (met promo-exceptie)
+    removed_old = cleanup_old_reposts(client, CLEANUP_DAYS)
+
     excluded_dids = get_excluded_dids(client)
 
     per_user_counts: Dict[str, int] = {}
@@ -402,8 +501,8 @@ def main() -> None:
 
     # Minimal logging
     print(
-        f"Run klaar. Feed: {done_feed}, "
-        f"Promo: {done_promo}, Totaal: {total_done}"
+        f"Run klaar. Oude reposts verwijderd (excl. promo): {removed_old}, "
+        f"Feed: {done_feed}, Promo: {done_promo}, Totaal nieuwe reposts: {total_done}"
     )
 
 
