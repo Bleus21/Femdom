@@ -17,23 +17,20 @@ MAX_REPOSTS_PER_RUN = 100
 MAX_PER_USER_PER_RUN = 6
 DELAY_SECONDS = 2
 
-# Feed + lists
+# Feed
 FEED_URI = (
     "at://did:plc:jaka644beit3x4vmmg6yysw7/"
     "app.bsky.feed.generator/aaagefhd3alla"
 )
 
-LIST_VERIFIED_URI = (
+# Lijst NIET REPOSTEN
+LIST_EXCLUDE_URI = (
     "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
     "app.bsky.graph.list/3mbacohly3f26"
 )
 
+# PROMO-lijst
 LIST_PROMO_URI = (
-    "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
-    "app.bsky.graph.list/3mbaaypwo5r2u"
-)
-
-LIST_EXCLUDE_URI = (
     "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
     "app.bsky.graph.list/3mbadkrmbg72j"
 )
@@ -123,7 +120,7 @@ def has_media_embed(record) -> bool:
     """
     embed = getattr(record, "embed", None)
     if not embed:
-        # fallback: soms embed op post in plaats van record
+        # fallback: soms embed op post ipv record
         post = getattr(record, "post", None)
         embed = getattr(post, "embed", None) if post else None
         if not embed:
@@ -140,7 +137,7 @@ def has_media_embed(record) -> bool:
     if hasattr(embed, "video") or hasattr(embed, "media"):
         return True
 
-    # External-only link -> niet
+    # External-only link -> niet tellen
     return False
 
 
@@ -204,7 +201,7 @@ def repost_post(
     if per_user_counts.get(author_did, 0) >= MAX_PER_USER_PER_RUN:
         return False
 
-    # Feed + verified: geen dubbele reposts
+    # Feed: geen dubbele reposts
     if not allow_repeat_for_promo and uri in reposted:
         return False
 
@@ -214,6 +211,7 @@ def repost_post(
         existing_repost = getattr(viewer, "repost", None)
         if existing_repost:
             try:
+                # Afhankelijk van type: string of object met uri
                 if isinstance(existing_repost, str):
                     client.delete_repost(existing_repost)
                 else:
@@ -221,7 +219,7 @@ def repost_post(
                     if existing_uri:
                         client.delete_repost(existing_uri)
             except Exception:
-                # Als dit faalt, gewoon toch alsnog een repost proberen
+                # Als dit faalt, toch nog een repost proberen
                 pass
 
     try:
@@ -239,7 +237,7 @@ def repost_post(
     return True
 
 
-# --- Verwerking van feed + lijsten ---------------------------------
+# --- Verwerking: feed & promo --------------------------------------
 
 
 def process_feed(
@@ -257,38 +255,6 @@ def process_feed(
         limit=100,
     )
     resp = client.app.bsky.feed.get_feed(params)
-
-    # Oud -> nieuw
-    items = sorted(resp.feed, key=lambda i: i.post.indexed_at)
-
-    done = 0
-    for item in items:
-        if remaining <= 0:
-            break
-        if not is_allowed_post(item, excluded_dids):
-            continue
-        if repost_post(client, item, per_user_counts, reposted, allow_repeat_for_promo=False):
-            done += 1
-            remaining -= 1
-
-    return done
-
-
-def process_verified_list(
-    client: Client,
-    excluded_dids: Set[str],
-    per_user_counts: Dict[str, int],
-    reposted: Set[str],
-    remaining: int,
-) -> int:
-    if remaining <= 0:
-        return 0
-
-    params = models.AppBskyFeedGetListFeed.Params(
-        list=LIST_VERIFIED_URI,
-        limit=100,
-    )
-    resp = client.app.bsky.feed.get_list_feed(params)
 
     # Oud -> nieuw
     items = sorted(resp.feed, key=lambda i: i.post.indexed_at)
@@ -409,19 +375,12 @@ def main() -> None:
     remaining = MAX_REPOSTS_PER_RUN
     total_done = 0
 
-    # 1. Feed
+    # 1. Feed (oud → nieuw)
     done_feed = process_feed(client, excluded_dids, per_user_counts, reposted, remaining)
     total_done += done_feed
     remaining -= done_feed
 
-    # 2. Verified list
-    done_verified = process_verified_list(
-        client, excluded_dids, per_user_counts, reposted, remaining
-    )
-    total_done += done_verified
-    remaining -= done_verified
-
-    # 3. Promo list
+    # 2. Promo-lijst (random uit laatste 5 per account)
     done_promo = process_promo_list(
         client, excluded_dids, per_user_counts, reposted, remaining
     )
@@ -429,9 +388,9 @@ def main() -> None:
 
     save_reposted(reposted)
 
-    # Nog steeds minimale logging, maar nu zie je per blok hoeveel er gedaan is
+    # Minimal logging
     print(
-        f"Run klaar. Feed: {done_feed}, Verified: {done_verified}, "
+        f"Run klaar. Feed: {done_feed}, "
         f"Promo: {done_promo}, Totaal: {total_done}"
     )
 
