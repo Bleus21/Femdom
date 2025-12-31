@@ -31,10 +31,10 @@ LIST_EXCLUDE_URI = (
     "app.bsky.graph.list/3mbacohly3f26"
 )
 
-# PROMO-lijst
+# ✅ JUISTE PROMO-lijst (g72j, niet d72j)
 LIST_PROMO_URI = (
     "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
-    "app.bsky.graph.list/3mbadkrmbd72j"
+    "app.bsky.graph.list/3mbadkrmbg72j"
 )
 
 
@@ -94,8 +94,11 @@ def cleanup_old_reposts(client: Client, days: int = CLEANUP_DAYS) -> int:
     Verwijder oude reposts ouder dan X dagen,
     MAAR niet wanneer de oorspronkelijke auteur in de promo-lijst zit.
     """
-    # Promo-leden ophalen (DIDs)
-    promo_members = set(get_list_members_dids(client, LIST_PROMO_URI))
+    # Promo-leden ophalen (DIDs) – veilig, mag niet crashen
+    try:
+        promo_members = set(get_list_members_dids(client, LIST_PROMO_URI))
+    except Exception:
+        promo_members = set()
 
     threshold = datetime.now(timezone.utc) - timedelta(days=days)
     deleted = 0
