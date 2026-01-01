@@ -1,30 +1,27 @@
 name: Femdom Auto Reposter
 
 on:
-  
-  workflow_dispatch: {}
+  schedule:
+    - cron: "08 */4 * * *"   # <-- elke 4 uur
+  workflow_dispatch:        # handmatig starten mogelijk
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v3
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install atproto
+        run: pip install atproto
 
-      - name: Run femdom autoposter
+      - name: Run autoposter
         env:
           BSKY_USERNAME_FD: ${{ secrets.BSKY_USERNAME_FD }}
           BSKY_PASSWORD_FD: ${{ secrets.BSKY_PASSWORD_FD }}
-        run: |
-          python autoposter_FD.py
+        run: python autoposter_FD.py
