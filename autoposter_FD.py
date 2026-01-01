@@ -23,7 +23,7 @@ LIST_EXCLUDE_URI = (
     "app.bsky.graph.list/3mbacohly3f26"
 )
 
-# PROMO lijst (BOVENAAN)
+# PROMO lijst
 LIST_PROMO_URI = (
     "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
     "app.bsky.graph.list/3mbadkrmbg72j"
@@ -365,7 +365,7 @@ def process_femdom(
                 continue
             all_items.append(item)
 
-    # Volgorde: echte TIJDLIJN (oud -> nieuw)
+    # Volgorde: TIJDLIJN (oud -> nieuw)
     all_items.sort(key=get_post_time_from_item)
 
     done = 0
@@ -397,23 +397,23 @@ def main() -> None:
     remaining = MAX_REPOSTS_PER_RUN
     total = 0
 
-    # 1. PROMO (bovenaan, maar nu in echte tijdlijn-volgorde binnen promo)
-    promo_count, remaining = process_promo(
-        client, excluded_dids, per_user_counts, reposted, remaining
-    )
-    total += promo_count
-
-    # 2. #femdom uit LIST_FEMDOM_URI, ook in globale tijdlijn-volgorde
+    # ⚠ Eerst femdom-lijst, zodat promo LAATST komt en dus BOVENAAN in je profiel-tijdlijn staat
     femdom_count, remaining = process_femdom(
         client, excluded_dids, per_user_counts, reposted, remaining
     )
     total += femdom_count
 
+    # Daarna PROMO (deze reposts zijn het nieuwste → staan bovenaan)
+    promo_count, remaining = process_promo(
+        client, excluded_dids, per_user_counts, reposted, remaining
+    )
+    total += promo_count
+
     save_reposted(reposted)
 
     print(
         f"Run klaar | Cleanup(excl promo):{removed} | "
-        f"Promo(tijdlijn):{promo_count} | Femdom(tijdlijn):{femdom_count} | "
+        f"Femdom(tijdlijn):{femdom_count} | Promo(tijdlijn/top):{promo_count} | "
         f"Totaal:{total}"
     )
 
