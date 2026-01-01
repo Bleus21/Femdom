@@ -17,17 +17,6 @@ MAX_PER_USER_PER_RUN = 6
 DELAY_SECONDS = 2
 CLEANUP_DAYS = 7
 
-# Lijst NIET REPOSTEN
-LIST_EXCLUDE_URI = (
-    "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
-    "app.bsky.graph.list/3mbacohly3f26"
-)
-
-# PROMO lijst
-LIST_PROMO_URI = (
-    "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
-    "app.bsky.graph.list/3mbadkrmbg72j"
-)
 
 # Femdom accounts → alleen repost als post #femdom bevat
 LIST_FEMDOM_URI = (
