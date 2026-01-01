@@ -1,8 +1,7 @@
 name: Femdom Auto Reposter
 
 on:
-  schedule:
-    - cron: "8 * * * *"   # ieder uur op minuut 8
+  
   workflow_dispatch: {}
 
 jobs:
