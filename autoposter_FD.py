@@ -3,11 +3,9 @@ import time
 import random
 from typing import List, Set, Dict, Optional
 from datetime import datetime, timezone, timedelta
-
 from atproto import Client, models
 
-
-# --- Config ---------------------------------------------------------
+# ================= CONFIG ================= #
 
 USERNAME = os.getenv("BSKY_USERNAME_FD")
 PASSWORD = os.getenv("BSKY_PASSWORD_FD")
@@ -17,497 +15,199 @@ REPOSTED_FILE = "reposted_FD.txt"
 MAX_REPOSTS_PER_RUN = 100
 MAX_PER_USER_PER_RUN = 6
 DELAY_SECONDS = 2
-CLEANUP_DAYS = 7  # reposts ouder dan 7 dagen verwijderen
+CLEANUP_DAYS = 7
 
-# Feed
-FEED_URI = (
-    "at://did:plc:jaka644beit3x4vmmg6yysw7/"
-    "app.bsky.feed.generator/aaagefhd3alla"
-)
+# Lijst NIET REP0STEN
+LIST_EXCLUDE_URI = "at://did:plc:o47xqce6eihq6wj75ntjftuw/app.bsky.graph.list/3mbacohly3f26"
 
-# Lijst NIET REPOSTEN
-LIST_EXCLUDE_URI = (
-    "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
-    "app.bsky.graph.list/3mbacohly3f26"
-)
+# PROMO lijst (BOVENAAN)
+LIST_PROMO_URI   = "at://did:plc:o47xqce6eihq6wj75ntjftuw/app.bsky.graph.list/3mbadkrmbg72j"
 
-# ✅ JUISTE PROMO-lijst (g72j, niet d72j)
-LIST_PROMO_URI = (
-    "at://did:plc:o47xqce6eihq6wj75ntjftuw/"
-    "app.bsky.graph.list/3mbadkrmbg72j"
-)
+# Femdom accounts → alleen repost als post #femdom bevat
+LIST_FEMDOM_URI  = "at://did:plc:jaka644beit3x4vmmg6yysw7/app.bsky.graph.list/3m3iga6wnmz2p"
 
 
-# --- State helpers --------------------------------------------------
-
+# ============= STATE OPSLAG ============== #
 
 def load_reposted() -> Set[str]:
-    if not os.path.exists(REPOSTED_FILE):
-        return set()
-    reposted: Set[str] = set()
-    with open(REPOSTED_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            uri = line.strip()
-            if uri:
-                reposted.add(uri)
-    return reposted
+    if not os.path.exists(REPOSTED_FILE): return set()
+    with open(REPOSTED_FILE,"r",encoding="utf-8") as f:
+        return {l.strip() for l in f if l.strip()}
 
-
-def save_reposted(reposted: Set[str]) -> None:
-    # Minimal, geen extra info in file
+def save_reposted(rep:Set[str]):
     try:
-        with open(REPOSTED_FILE, "w", encoding="utf-8") as f:
-            for uri in sorted(reposted):
-                f.write(uri + "\n")
-    except Exception:
-        # Als wegschrijven faalt, script niet laten crashen
-        pass
+        with open(REPOSTED_FILE,"w",encoding="utf-8") as f:
+            for u in sorted(rep): f.write(u+"\n")
+    except: pass
+
+def client_login()->Client:
+    c=Client(); c.login(USERNAME,PASSWORD); return c
 
 
-def create_client() -> Client:
-    if not USERNAME or not PASSWORD:
-        raise RuntimeError("BSKY_USERNAME_FD of BSKY_PASSWORD_FD ontbreekt.")
-    client = Client()
-    client.login(USERNAME, PASSWORD)
-    return client
+# ------------- BASE FUNCTIONS ------------- #
 
+def parse_time(t:str):
+    if not t: return None
+    if t.endswith("Z"): t=t[:-1]+"+00:00"
+    try: return datetime.fromisoformat(t)
+    except: return None
 
-# --- Helpers: tijd / cleanup ----------------------------------------
-
-
-def parse_iso_datetime(value: str) -> Optional[datetime]:
-    """
-    Veilige ISO8601-parser met support voor 'Z'.
-    """
-    if not value:
-        return None
-    try:
-        if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
-        return datetime.fromisoformat(value)
-    except Exception:
-        return None
-
-
-def cleanup_old_reposts(client: Client, days: int = CLEANUP_DAYS) -> int:
-    """
-    Verwijder oude reposts ouder dan X dagen,
-    MAAR niet wanneer de oorspronkelijke auteur in de promo-lijst zit.
-    """
-    # Promo-leden ophalen (DIDs) – veilig, mag niet crashen
-    try:
-        promo_members = set(get_list_members_dids(client, LIST_PROMO_URI))
-    except Exception:
-        promo_members = set()
-
-    threshold = datetime.now(timezone.utc) - timedelta(days=days)
-    deleted = 0
-    cursor: Optional[str] = None
-
+def get_list_dids(c,uri)->List[str]:
+    dids=[]; cur=None
     while True:
-        params = models.AppBskyFeedGetAuthorFeed.Params(
-            actor=USERNAME,  # handle van deze bot
-            limit=100,
-            cursor=cursor,
-        )
-        resp = client.app.bsky.feed.get_author_feed(params)
-        if not resp.feed:
-            break
+        try:
+            r=c.app.bsky.graph.get_list(models.AppBskyGraphGetList.Params(list=uri,limit=100,cursor=cur))
+        except: break
+        for i in r.items:
+            s=getattr(i,"subject",None)
+            did=s if isinstance(s,str) else getattr(s,"did",None)
+            if did: dids.append(did)
+        if not r.cursor: break
+        cur=r.cursor
+    return dids
 
-        for item in resp.feed:
-            post = getattr(item, "post", None)
-            if not post:
-                continue
-
-            record = getattr(post, "record", None)
-            if not record:
-                continue
-
-            # Alleen repost records opruimen
-            if getattr(record, "$type", "") != "app.bsky.feed.repost":
-                continue
-
-            indexed_at = getattr(post, "indexed_at", None)
-            dt = parse_iso_datetime(indexed_at) if indexed_at else None
-            if not dt or dt > threshold:
-                # Niet oud genoeg of geen datum
-                continue
-
-            # Originele subject (de post die gerepost is)
-            subject = getattr(record, "subject", None)
-            subj_uri = getattr(subject, "uri", None) if subject else None
-
-            original_author_did: Optional[str] = None
-            if subj_uri:
-                try:
-                    posts_resp = client.app.bsky.feed.get_posts(
-                        models.AppBskyFeedGetPosts.Params(uris=[subj_uri])
-                    )
-                    for p in posts_resp.posts:
-                        if p.uri == subj_uri:
-                            auth = getattr(p, "author", None)
-                            original_author_did = getattr(auth, "did", None)
-                            break
-                except Exception:
-                    original_author_did = None
-
-            # 👉 Als originele auteur in promo-lijst zit → NIET verwijderen
-            if original_author_did in promo_members:
-                continue
-
-            # Oude repost verwijderen
-            try:
-                client.delete_repost(post.uri)
-                deleted += 1
-            except Exception:
-                continue
-
-        if not resp.cursor:
-            break
-        cursor = resp.cursor
-
-    return deleted
-
-
-# --- Lijsten & filters ----------------------------------------------
-
-
-def _extract_did_from_list_item(item) -> Optional[str]:
-    """
-    Veilige DID-extractie uit list-item (subject kan object of string zijn).
-    """
-    subject = getattr(item, "subject", None)
-    if not subject:
-        return None
-
-    if isinstance(subject, str):
-        return subject
-
-    return getattr(subject, "did", None)
-
-
-def get_excluded_dids(client: Client) -> Set[str]:
-    """
-    Haalt alle DIDs op uit de 'niet reposten'-lijst.
-    """
-    excluded: Set[str] = set()
-    cursor: Optional[str] = None
-
-    while True:
-        params = models.AppBskyGraphGetList.Params(
-            list=LIST_EXCLUDE_URI,
-            limit=100,
-            cursor=cursor,
-        )
-        resp = client.app.bsky.graph.get_list(params)
-
-        for item in resp.items:
-            did = _extract_did_from_list_item(item)
-            if did:
-                excluded.add(did)
-
-        if not resp.cursor:
-            break
-        cursor = resp.cursor
-
-    return excluded
-
-
-def has_media_embed(record) -> bool:
-    """
-    True als er echte media is (geen pure link of quote).
-    """
-    embed = getattr(record, "embed", None)
-    if not embed:
-        # fallback: soms embed op post ipv record
-        post = getattr(record, "post", None)
-        embed = getattr(post, "embed", None) if post else None
-        if not embed:
-            return False
-
-    # Quote-posts hebben een eigen record in embed
-    if hasattr(embed, "record"):
-        return False
-
-    images = getattr(embed, "images", None)
-    if images:
-        return True
-
-    if hasattr(embed, "video") or hasattr(embed, "media"):
-        return True
-
-    # External-only link -> niet tellen
+def media_ok(rec)->bool:
+    e=getattr(rec,"embed",None)
+    if not e: return False
+    if hasattr(e,"record"): return False
+    if getattr(e,"images",None): return True
+    if hasattr(e,"video") or hasattr(e,"media"): return True
     return False
 
+def is_valid(item,exclude)->bool:
+    p=getattr(item,"post",None); r=getattr(p,"record",None) if p else None
+    if not p or not r: return False
+    if getattr(p.author,"did",None) in exclude: return False
+    if getattr(r,"reply",None): return False
+    if getattr(item,"reason",None): return False
+    return media_ok(r)
 
-def is_allowed_post(feed_item, excluded_dids: Set[str]) -> bool:
-    """
-    Toetst alle voorwaarden:
-    - geen text-only
-    - geen reply
-    - geen repost
-    - geen quotepost
-    - geen link-only
-    - geen accounts uit exclude-list
-    """
-    post = getattr(feed_item, "post", None)
-    if not post:
-        return False
+def has_femdom(item)->bool:
+    txt=getattr(item.post.record,"text","") or ""
+    return "#femdom" in txt.lower()
 
-    author = getattr(post, "author", None)
-    author_did = getattr(author, "did", None)
-    if author_did in excluded_dids:
-        return False
+# ------------ CLEANUP >7 DAGEN ------------ #
 
-    record = getattr(post, "record", None)
-    if not record:
-        return False
+def cleanup_old(c:Client,days:int):
+    try: promo=set(get_list_dids(c,LIST_PROMO_URI))
+    except: promo=set()
 
-    # Geen replies
-    if getattr(record, "reply", None):
-        return False
+    cut=datetime.now(timezone.utc)-timedelta(days=days)
+    delcount=0; cur=None
 
-    # Geen reposts (timeline/list-feed reason)
-    if getattr(feed_item, "reason", None) is not None:
-        return False
+    while True:
+        r=c.app.bsky.feed.get_author_feed(models.AppBskyFeedGetAuthorFeed.Params(actor=USERNAME,limit=100,cursor=cur))
+        for f in r.feed:
+            p=getattr(f,"post",None); rec=getattr(p,"record",None) if p else None
+            if not p or not rec or getattr(rec,"$type","")!="app.bsky.feed.repost": continue
 
-    # Moet media bevatten en geen quotes/links-only
-    if not has_media_embed(record):
-        return False
+            dt=parse_time(p.indexed_at)
+            if not dt or dt>cut: continue
 
-    return True
+            subj=getattr(rec,"subject",None); u=getattr(subj,"uri",None) if subj else None
+            orig=None
+            if u:
+                try:
+                    P=c.app.bsky.feed.get_posts(models.AppBskyFeedGetPosts.Params(uris=[u]))
+                    for pp in P.posts:
+                        if pp.uri==u: orig=getattr(pp.author,"did",None)
+                except: pass
+
+            if orig in promo: continue
+
+            try: c.delete_repost(p.uri); delcount+=1
+            except: pass
+
+        if not r.cursor: break
+        cur=r.cursor
+
+    return delcount
 
 
-def repost_post(
-    client: Client,
-    feed_item,
-    per_user_counts: Dict[str, int],
-    reposted: Set[str],
-    allow_repeat_for_promo: bool = False,
-) -> bool:
-    """
-    Repost + per-user limit + tracking.
-    Bij promo mag hij oude reposts opnieuw doen (met un-repost).
-    Geeft de post ook meteen een like.
-    """
-    post = feed_item.post
-    uri = post.uri
-    cid = post.cid
+# ------------ REPOST ACTION ------------- #
 
-    author = getattr(post, "author", None)
-    author_did = getattr(author, "did", "") if author else ""
+def do_repost(c,item,per,rep,promo=False):
+    p=item.post; uri=p.uri; cid=p.cid
+    did=getattr(p.author,"did","")
+    if per.get(did,0)>=MAX_PER_USER_PER_RUN: return False
+    if not promo and uri in rep: return False
 
-    # Per-user limit (over gehele run)
-    if per_user_counts.get(author_did, 0) >= MAX_PER_USER_PER_RUN:
-        return False
-
-    # Feed: geen dubbele reposts
-    if not allow_repeat_for_promo and uri in reposted:
-        return False
-
-    # Promo: als wijzelf al een repost hebben staan -> un-repost eerst
-    if allow_repeat_for_promo:
-        viewer = getattr(post, "viewer", None)
-        existing_repost = getattr(viewer, "repost", None)
-        if existing_repost:
-            try:
-                # Afhankelijk van type: string of object met uri
-                if isinstance(existing_repost, str):
-                    client.delete_repost(existing_repost)
-                else:
-                    existing_uri = getattr(existing_repost, "uri", None)
-                    if existing_uri:
-                        client.delete_repost(existing_uri)
-            except Exception:
-                # Als dit faalt, toch nog een repost proberen
-                pass
+    if promo:
+        v=getattr(p,"viewer",None); ex=getattr(v,"repost",None)
+        if ex:
+            try: c.delete_repost(ex if isinstance(ex,str) else ex.uri)
+            except: pass
 
     try:
-        # Repost
-        client.repost(uri=uri, cid=cid)
-        # Like erbij
-        try:
-            client.like(uri=uri, cid=cid)
-        except Exception:
-            # Like moet niet de run laten falen
-            pass
-    except Exception:
-        # Minimal logging -> geen trace
-        return False
+        c.repost(uri=uri,cid=cid)
+        try: c.like(uri=uri,cid=cid)
+        except: pass
+    except: return False
 
-    # Tracking
-    reposted.add(uri)
-    if author_did:
-        per_user_counts[author_did] = per_user_counts.get(author_did, 0) + 1
-
+    rep.add(uri); per[did]=per.get(did,0)+1
     time.sleep(DELAY_SECONDS)
     return True
 
 
-# --- Verwerking: feed & promo --------------------------------------
+# ------------ PROCESS PROMO FIRST ------------ #
+
+def process_promo(c,exclude,per,rep,rem):
+    done=0
+    mem=get_list_dids(c,LIST_PROMO_URI)
+    random.shuffle(mem)
+    for did in mem:
+        if rem<=0: break
+        if did in exclude or per.get(did,0)>=MAX_PER_USER_PER_RUN: continue
+
+        r=c.app.bsky.feed.get_author_feed(models.AppBskyFeedGetAuthorFeed.Params(actor=did,limit=5,filter="posts_with_media"))
+        cand=[i for i in r.feed if is_valid(i,exclude)]
+
+        if cand and do_repost(c,random.choice(cand),per,rep,promo=True):
+            done+=1; rem-=1
+
+    return done,rem
 
 
-def process_feed(
-    client: Client,
-    excluded_dids: Set[str],
-    per_user_counts: Dict[str, int],
-    reposted: Set[str],
-    remaining: int,
-) -> int:
-    if remaining <= 0:
-        return 0
+# --------- PROCESS #FEMDOM ACCOUNTS --------- #
 
-    params = models.AppBskyFeedGetFeed.Params(
-        feed=FEED_URI,
-        limit=100,
-    )
-    resp = client.app.bsky.feed.get_feed(params)
+def process_femdom(c,exclude,per,rep,rem):
+    done=0
+    mem=get_list_dids(c,LIST_FEMDOM_URI)
+    for did in mem:
+        if rem<=0: break
+        if did in exclude or per.get(did,0)>=MAX_PER_USER_PER_RUN: continue
 
-    # Oud -> nieuw
-    items = sorted(resp.feed, key=lambda i: i.post.indexed_at)
+        r=c.app.bsky.feed.get_author_feed(models.AppBskyFeedGetAuthorFeed.Params(actor=did,limit=20,filter="posts_with_media"))
+        items=[i for i in r.feed if is_valid(i,exclude) and has_femdom(i)]
 
-    done = 0
-    for item in items:
-        if remaining <= 0:
-            break
-        if not is_allowed_post(item, excluded_dids):
-            continue
-        if repost_post(client, item, per_user_counts, reposted, allow_repeat_for_promo=False):
-            done += 1
-            remaining -= 1
+        for item in sorted(items,key=lambda x:x.post.indexed_at):
+            if rem<=0: break
+            if do_repost(c,item,per,rep,promo=False):
+                done+=1; rem-=1
 
-    return done
+    return done,rem
 
 
-def get_list_members_dids(client: Client, list_uri: str) -> List[str]:
-    """
-    Haal alle DIDs uit een list.
-    """
-    dids: List[str] = []
-    cursor: Optional[str] = None
+# ================= MAIN ================= #
 
-    while True:
-        params = models.AppBskyGraphGetList.Params(
-            list=list_uri,
-            limit=100,
-            cursor=cursor,
-        )
-        resp = client.app.bsky.graph.get_list(params)
+def main():
+    rep=load_reposted()
 
-        for item in resp.items:
-            did = _extract_did_from_list_item(item)
-            if did:
-                dids.append(did)
+    try: c=client_login()
+    except: print("Login mislukt"); return
 
-        if not resp.cursor:
-            break
-        cursor = resp.cursor
+    removed=cleanup_old(c,CLEANUP_DAYS)
+    exclude=set(get_list_dids(c,LIST_EXCLUDE_URI))
 
-    return dids
+    per={}; rem=MAX_REPOSTS_PER_RUN; total=0
+
+    p,rem=process_promo(c,exclude,per,rep,rem); total+=p
+    f,rem=process_femdom(c,exclude,per,rep,rem); total+=f
+
+    save_reposted(rep)
+
+    print(f"Run klaar | Cleanup:{removed} | Promo:{p} | Femdom:{f} | Totaal:{total}")
 
 
-def pick_random_recent_media_post(
-    client: Client,
-    actor: str,
-    excluded_dids: Set[str],
-) -> Optional[object]:
-    """
-    Pak max 5 recente posts met media van een actor en kies er 1 random uit
-    die door de filters komt.
-    """
-    params = models.AppBskyFeedGetAuthorFeed.Params(
-        actor=actor,
-        limit=5,
-        filter="posts_with_media",
-    )
-    resp = client.app.bsky.feed.get_author_feed(params)
-
-    candidates = [item for item in resp.feed if is_allowed_post(item, excluded_dids)]
-    if not candidates:
-        return None
-
-    return random.choice(candidates)
-
-
-def process_promo_list(
-    client: Client,
-    excluded_dids: Set[str],
-    per_user_counts: Dict[str, int],
-    reposted: Set[str],
-    remaining: int,
-) -> int:
-    if remaining <= 0:
-        return 0
-
-    members = get_list_members_dids(client, LIST_PROMO_URI)
-
-    # Random volgorde van accounts
-    random.shuffle(members)
-
-    done = 0
-
-    # Per actor 1 random post uit laatste 5, in gehusselde volgorde
-    for did in members:
-        if remaining <= 0:
-            break
-
-        if did in excluded_dids:
-            continue
-
-        if per_user_counts.get(did, 0) >= MAX_PER_USER_PER_RUN:
-            continue
-
-        item = pick_random_recent_media_post(client, did, excluded_dids)
-        if not item:
-            continue
-
-        if repost_post(client, item, per_user_counts, reposted, allow_repeat_for_promo=True):
-            done += 1
-            remaining -= 1
-
-    return done
-
-
-# --- Main -----------------------------------------------------------
-
-
-def main() -> None:
-    reposted = load_reposted()
-
-    try:
-        client = create_client()
-    except Exception:
-        print("Kon niet inloggen op Bluesky.")
-        return
-
-    # 0. Opruimen: oude reposts verwijderen (met promo-exceptie)
-    removed_old = cleanup_old_reposts(client, CLEANUP_DAYS)
-
-    excluded_dids = get_excluded_dids(client)
-
-    per_user_counts: Dict[str, int] = {}
-    remaining = MAX_REPOSTS_PER_RUN
-    total_done = 0
-
-    # 1. Feed (oud → nieuw)
-    done_feed = process_feed(client, excluded_dids, per_user_counts, reposted, remaining)
-    total_done += done_feed
-    remaining -= done_feed
-
-    # 2. Promo-lijst (random volgorde, random post per account)
-    done_promo = process_promo_list(
-        client, excluded_dids, per_user_counts, reposted, remaining
-    )
-    total_done += done_promo
-
-    save_reposted(reposted)
-
-    # Minimal logging
-    print(
-        f"Run klaar. Oude reposts verwijderd (excl. promo): {removed_old}, "
-        f"Feed: {done_feed}, Promo: {done_promo}, Totaal nieuwe reposts: {total_done}"
-    )
-
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
