@@ -16,7 +16,7 @@ LIST_FEMDOM_URI = "at://did:plc:jaka644beit3x4vmmg6yysw7/app.bsky.graph.list/3m3
 MAX_REPOSTS_PER_RUN = 100
 MAX_PER_USER_PER_RUN = 6
 DELAY_SECONDS = 2
-CLEANUP_DAYS = 7
+CLEANUP_DAYS = 14
 
 
 # --------------- STATE ---------------- #
